@@ -8,8 +8,8 @@ A Fortytwo managed landing zone (MLZ) module for Azure NAT Gateway, in AzAPI: th
 - **StandardV2 by default**: zone-redundant, IPv4 and IPv6, NAT64 (`nat64_enabled`) and flow logs
   (`NatGatewayFlowlogsV1`, through `diagnostic_settings`). **Standard** is zonal (`zones`, one zone) or in
   no zone, IPv4 only. Azure changes neither the SKU nor the zone of an existing gateway, so changing either
-  replaces it, under a new `name` (and new names for the addresses and prefixes it creates). StandardV2 is
-  not offered in Canada East, India South Central, Sweden South and West India.
+  replaces it (see the replacements below). StandardV2 is not offered in Canada East, India South
+  Central, Sweden South and West India.
 - **Public IP addresses and prefixes** are created through
   [`az-tf-mlz-public-ip`](https://github.com/fortytwoservices/az-tf-mlz-public-ip) (`public_ips`,
   `public_ip_prefixes`, keyed by stable names) with the gateway's SKU and zone, which Azure requires, or
@@ -17,9 +17,15 @@ A Fortytwo managed landing zone (MLZ) module for Azure NAT Gateway, in AzAPI: th
   addresses, counting those in prefixes, and on StandardV2 also 16 IPv6. Removing one detaches it before
   it is destroyed (Azure deletes no address in use), because the gateway is `create_before_destroy`.
 - **Subnets attach themselves**: a subnet sets `natGateway.id` to `resource_id`, as in the example. Azure
-  deletes a gateway only once no subnet uses it, so a replacement creates the new gateway first: subnets in
-  the same configuration move to it, then the old one is deleted. Subnets elsewhere must move before the
-  old gateway can go.
+  deletes a gateway only once no subnet uses it, so a replacement (a change of `name`, `sku_name`, `zones`
+  or `location`) creates the new gateway first: subnets in the same configuration move to it, then the old
+  one is deleted. Subnets elsewhere must move before the old gateway can go.
+- **A replacement needs new public IP addresses and prefixes**: the old gateway holds its own until it is
+  deleted. Give the created ones new names and the existing ones other IDs, so the outbound addresses
+  change. A replacement for another reason than a rename also needs a new `name`.
+- **A `ReadOnly` lock blocks changes to the gateway itself**, as in every MLZ module: remove it, or use
+  `CanNotDelete`, before changing the gateway. The module does not lift it automatically, which would
+  defeat the lock.
 - **Removing a setting reaches Azure.** Every address and prefix list is sent, empty when unset, because
   azapi compares only the keys in the body.
 - Lock, role assignments and diagnostic settings, as in Azure Verified Modules, through
@@ -69,7 +75,7 @@ Type: `string`
 
 ### <a name="input_name"></a> [name](#input\_name)
 
-Description: Name of the NAT gateway. A replacement (a change of `sku_name` or `zones`) needs a new name: the new gateway is created before the old one is deleted, so that subnets in the same configuration move to it first.
+Description: Name of the NAT gateway. A replacement (a change of `name`, `sku_name`, `zones` or `location`) creates the new gateway before the old one is deleted, so that subnets in the same configuration move to it first. Until then the old gateway holds its public IP addresses and prefixes, so the new one needs others: new names in `public_ips` and `public_ip_prefixes`, other IDs in `public_ip_resource_ids` and `public_ip_prefix_resource_ids`. Outbound addresses therefore change with a replacement, and a replacement for another reason than a rename also needs a new name.
 
 Type: `string`
 
@@ -385,7 +391,7 @@ Default: `{}`
 
 ### <a name="input_sku_name"></a> [sku\_name](#input\_sku\_name)
 
-Description: (Optional) `StandardV2` (default: zone-redundant, IPv6, NAT64, flow logs) or `Standard` (zonal or no zone, IPv4 only). Its public IP addresses and prefixes must have the same SKU. Azure cannot change the SKU, so changing it replaces the NAT gateway and the addresses and prefixes it creates, which then need new names (see `name`). StandardV2 is not offered in Canada East, India South Central, Sweden South and West India.
+Description: (Optional) `StandardV2` (default: zone-redundant, IPv6, NAT64, flow logs) or `Standard` (zonal or no zone, IPv4 only). Its public IP addresses and prefixes must have the same SKU. Azure cannot change the SKU, so changing it replaces the NAT gateway (see `name`). StandardV2 is not offered in Canada East, India South Central, Sweden South and West India.
 
 Type: `string`
 
@@ -423,7 +429,7 @@ Default: `null`
 
 ### <a name="input_zones"></a> [zones](#input\_zones)
 
-Description: (Optional) The one availability zone of a zonal Standard NAT gateway, for example `["1"]`. Null (the default) leaves a Standard gateway in no zone, where Azure places it; a StandardV2 gateway is always zone-redundant and takes no zones. Azure cannot move a gateway between zones, so changing this replaces it and the addresses and prefixes it creates, which then need new names (see `name`).
+Description: (Optional) The one availability zone of a zonal Standard NAT gateway, for example `["1"]`. Null (the default) leaves a Standard gateway in no zone, where Azure places it; a StandardV2 gateway is always zone-redundant and takes no zones. Azure cannot move a gateway between zones, so changing this replaces it (see `name`).
 
 Type: `list(string)`
 

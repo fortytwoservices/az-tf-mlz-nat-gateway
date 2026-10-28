@@ -6,7 +6,7 @@ variable "location" {
 
 variable "name" {
   type        = string
-  description = "Name of the NAT gateway. A replacement (a change of `sku_name` or `zones`) needs a new name: the new gateway is created before the old one is deleted, so that subnets in the same configuration move to it first."
+  description = "Name of the NAT gateway. A replacement (a change of `name`, `sku_name`, `zones` or `location`) creates the new gateway before the old one is deleted, so that subnets in the same configuration move to it first. Until then the old gateway holds its public IP addresses and prefixes, so the new one needs others: new names in `public_ips` and `public_ip_prefixes`, other IDs in `public_ip_resource_ids` and `public_ip_prefix_resource_ids`. Outbound addresses therefore change with a replacement, and a replacement for another reason than a rename also needs a new name."
   nullable    = false
 
   validation {
@@ -185,7 +185,7 @@ DESCRIPTION
 variable "sku_name" {
   type        = string
   default     = "StandardV2"
-  description = "(Optional) `StandardV2` (default: zone-redundant, IPv6, NAT64, flow logs) or `Standard` (zonal or no zone, IPv4 only). Its public IP addresses and prefixes must have the same SKU. Azure cannot change the SKU, so changing it replaces the NAT gateway and the addresses and prefixes it creates, which then need new names (see `name`). StandardV2 is not offered in Canada East, India South Central, Sweden South and West India."
+  description = "(Optional) `StandardV2` (default: zone-redundant, IPv6, NAT64, flow logs) or `Standard` (zonal or no zone, IPv4 only). Its public IP addresses and prefixes must have the same SKU. Azure cannot change the SKU, so changing it replaces the NAT gateway (see `name`). StandardV2 is not offered in Canada East, India South Central, Sweden South and West India."
   nullable    = false
 
   validation {
@@ -197,7 +197,7 @@ variable "sku_name" {
 variable "zones" {
   type        = list(string)
   default     = null
-  description = "(Optional) The one availability zone of a zonal Standard NAT gateway, for example `[\"1\"]`. Null (the default) leaves a Standard gateway in no zone, where Azure places it; a StandardV2 gateway is always zone-redundant and takes no zones. Azure cannot move a gateway between zones, so changing this replaces it and the addresses and prefixes it creates, which then need new names (see `name`)."
+  description = "(Optional) The one availability zone of a zonal Standard NAT gateway, for example `[\"1\"]`. Null (the default) leaves a Standard gateway in no zone, where Azure places it; a StandardV2 gateway is always zone-redundant and takes no zones. Azure cannot move a gateway between zones, so changing this replaces it (see `name`)."
 
   validation {
     condition     = var.zones == null ? true : length(var.zones) == 1 && alltrue([for zone in var.zones : contains(["1", "2", "3"], zone)])

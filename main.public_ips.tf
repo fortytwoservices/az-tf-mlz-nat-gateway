@@ -1,6 +1,6 @@
 # The gateway's SKU and zones, because Azure attaches only addresses and prefixes of the same SKU, and to a
 # zonal Standard gateway only those in its zone. They inherit the gateway's create_before_destroy (main.tf),
-# so a removed one is destroyed after the gateway's update, and a replaced one needs a new name.
+# so a removed one is destroyed after the gateway's update, and a replacement needs new ones (see `name`).
 module "public_ip" {
   source   = "git::https://github.com/fortytwoservices/az-tf-mlz-public-ip.git?ref=v0.1.2"
   for_each = var.public_ips

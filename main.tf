@@ -48,8 +48,9 @@ resource "azapi_resource" "this" {
   # Azure deletes neither an address or prefix the gateway uses nor a gateway a subnet uses. Terraform
   # passes create_before_destroy on to the addresses and prefixes this depends on, so a removed one is
   # detached by the gateway's update before it is destroyed (otherwise it is destroyed first, and fails).
-  # A replacement creates the new gateway first, so it needs a new name, and the subnets in the same
-  # configuration move to it before the old one is deleted.
+  # A replacement creates the new gateway first, so it needs a new name and new addresses and prefixes
+  # (the old gateway holds its own until it is deleted), and the subnets in the same configuration move to
+  # it before the old one is deleted.
   lifecycle {
     create_before_destroy = true
   }
