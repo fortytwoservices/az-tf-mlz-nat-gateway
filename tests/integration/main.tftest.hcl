@@ -1,7 +1,8 @@
-# Real Azure, no mocks: ARM_SUBSCRIPTION_ID=<test subscription> terraform test -test-directory=tests/integration
-# Proves what mocks cannot: credentials written in parallel are serialised, survive an update of the
-# identity, can be removed or updated in place under the lock (ReadOnly too), and the lock is removed
-# before everything else on destroy.
+# Real Azure, no mocks: ARM_SUBSCRIPTION_ID=<test subscription> scripts/integration.sh .
+# Proves what mocks cannot: the default API version and body are accepted (StandardV2 with IPv4 and IPv6
+# addresses, a prefix, NAT64 and flow logs; Standard zonal and in no zone) and read back as sent, removed
+# addresses and prefixes leave the gateway before they are destroyed, the gateway is updated and replaced
+# under its lock, and everything is destroyed. The empty second plan is the e2e test's (scripts/e2e.sh).
 
 run "setup" {
   module {
@@ -9,15 +10,24 @@ run "setup" {
   }
 }
 
-run "create" {
+run "create_standard_v2" {
   variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
+    name      = "ng-mlz-it-${run.setup.suffix}"
     parent_id = run.setup.resource_group_id
     location  = run.setup.location
-    federated_identity_credentials = {
-      one   = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two   = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two" }
-      three = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:three" }
+    public_ips = {
+      v4 = { name = "pip-mlz-ng-v4-${run.setup.suffix}" }
+      v6 = { name = "pip-mlz-ng-v6-${run.setup.suffix}", ip_version = "IPv6" }
+    }
+    public_ip_prefixes = {
+      v4 = { name = "ippre-mlz-ng-v4-${run.setup.suffix}", prefix_length = 31 }
+    }
+    nat64_enabled = true
+    diagnostic_settings = {
+      workspace = {
+        workspace_resource_id = run.setup.workspace_id
+        logs                  = [{ category = "NatGatewayFlowlogsV1" }]
+      }
     }
     lock = { kind = "CanNotDelete" }
     role_assignments = {
@@ -26,79 +36,56 @@ run "create" {
   }
 
   assert {
-    condition     = length(output.federated_identity_credential_resource_ids) == 3
-    error_message = "All three credentials should be created."
+    condition     = can(cidrhost("${output.public_ip_addresses["v4"]}/32", 0)) && can(cidrhost("${output.public_ip_addresses["v6"]}/128", 0))
+    error_message = "An IPv4 and an IPv6 address should be read back from Azure."
   }
   assert {
-    condition     = can(regex("^[0-9a-f-]{36}$", output.principal_id)) && can(regex("^[0-9a-f-]{36}$", output.client_id))
-    error_message = "principal_id and client_id should be read back from Azure."
+    condition     = endswith(output.public_ip_prefixes["v4"], "/31")
+    error_message = "The /31 prefix should be read back from Azure."
   }
 }
 
-run "update_identity" {
-  variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
-    parent_id = run.setup.resource_group_id
-    location  = run.setup.location
-    federated_identity_credentials = {
-      one   = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two   = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two" }
-      three = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:three" }
-    }
-    lock = { kind = "CanNotDelete" }
-    role_assignments = {
-      reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
-    }
-    isolation_scope = "Regional"
-    tags            = { updated = "true" } # a PUT of the identity without its credentials
-  }
-
-  assert {
-    condition     = azapi_resource.this.tags == tomap({ updated = "true" })
-    error_message = "The identity should be updated in place."
-  }
-}
-
-run "credentials_survive" {
+run "read_standard_v2" {
   module {
     source = "./tests/integration/read"
   }
 
   variables {
-    credential_ids = run.update_identity.federated_identity_credential_resource_ids
+    nat_gateway_id = run.create_standard_v2.resource_id
   }
 
   assert {
-    condition     = output.subjects.two == "repo:example-org/example-repo:environment:two" && length(output.subjects) == 3
-    error_message = "The credentials should still exist after the identity was updated."
+    condition     = output.sku_name == "StandardV2" && try(length(output.zones), 0) == 0 && output.nat64 == "Enabled" && output.idle_timeout_in_minutes == 4
+    error_message = "Azure should hold a StandardV2 gateway without zones, with NAT64 and the default idle timeout."
   }
-}
-
-run "isolation_scope_set_in_azure" {
-  module {
-    source = "./tests/integration/read_identity"
-  }
-
-  variables {
-    identity_id = run.update_identity.resource_id
-  }
-
   assert {
-    condition     = output.isolation_scope == "Regional"
-    error_message = "Azure should report the Regional isolation scope set by update_identity."
+    condition = jsonencode(output.public_ip_ids) == jsonencode({
+      publicIpAddresses   = [lower(run.create_standard_v2.public_ip_resource_ids["v4"])]
+      publicIpAddressesV6 = [lower(run.create_standard_v2.public_ip_resource_ids["v6"])]
+      publicIpPrefixes    = [lower(run.create_standard_v2.public_ip_prefix_resource_ids["v4"])]
+      publicIpPrefixesV6  = []
+    })
+    error_message = "Azure should hold each address and prefix in the list of its IP version."
   }
 }
 
-run "remove_credential_under_lock" {
-  # A credential is deleted while the lock stays configured: the lock is removed and created again
-  # around the change. The scope goes back to Azure's default, which must reach Azure.
+run "update_standard_v2_under_lock" {
+  # The IPv6 address and the prefix are removed and destroyed, an existing address is added, NAT64 is
+  # switched off and the idle timeout changed, all with the gateway locked.
   variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
+    name      = "ng-mlz-it-${run.setup.suffix}"
     parent_id = run.setup.resource_group_id
     location  = run.setup.location
-    federated_identity_credentials = {
-      one = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two" }
+    public_ips = {
+      v4 = { name = "pip-mlz-ng-v4-${run.setup.suffix}" }
+    }
+    public_ip_resource_ids  = { ipv4 = [run.setup.public_ip_standard_v2_id] }
+    idle_timeout_in_minutes = 10
+    diagnostic_settings = {
+      workspace = {
+        workspace_resource_id = run.setup.workspace_id
+        logs                  = [{ category = "NatGatewayFlowlogsV1" }]
+      }
     }
     lock = { kind = "CanNotDelete" }
     role_assignments = {
@@ -107,95 +94,107 @@ run "remove_credential_under_lock" {
   }
 
   assert {
-    condition     = keys(output.federated_identity_credential_resource_ids) == ["one", "two"] && module.interfaces.lock_resource_id != null
-    error_message = "The third credential should be gone and the lock back."
+    condition     = output.resource_id == run.create_standard_v2.resource_id && keys(output.public_ip_resource_ids) == ["v4"] && length(output.public_ip_prefix_resource_ids) == 0
+    error_message = "The gateway should be updated in place, and the removed address and prefix destroyed."
   }
 }
 
-run "isolation_scope_reset_in_azure" {
-  module {
-    source = "./tests/integration/read_identity"
-  }
-
-  variables {
-    identity_id = run.remove_credential_under_lock.resource_id
-  }
-
-  assert {
-    condition     = output.isolation_scope == "None"
-    error_message = "Azure should report the default isolation scope again once isolation_scope is no longer set."
-  }
-}
-
-run "readonly_lock" {
-  variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
-    parent_id = run.setup.resource_group_id
-    location  = run.setup.location
-    federated_identity_credentials = {
-      one = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two" }
-    }
-    lock = { kind = "ReadOnly" }
-    role_assignments = {
-      reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
-    }
-  }
-}
-
-run "update_credential_under_readonly_lock" {
-  # A credential updated in place keeps its ID, and a ReadOnly lock blocks the write: the credential's
-  # lock_dependency changes with its body, so the lock is removed and created again around it.
-  variables {
-    name      = "id-mlz-it-${run.setup.suffix}"
-    parent_id = run.setup.resource_group_id
-    location  = run.setup.location
-    federated_identity_credentials = {
-      one = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
-      two = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:two-updated" }
-    }
-    lock = { kind = "ReadOnly" }
-    role_assignments = {
-      reader = { role_definition_id_or_name = "Reader", principal_id = run.setup.object_id }
-    }
-  }
-
-  assert {
-    condition     = output.federated_identity_credential_resource_ids["two"] == run.readonly_lock.federated_identity_credential_resource_ids["two"] && module.interfaces.lock_resource_id != null
-    error_message = "The credential should be updated in place and the lock back."
-  }
-}
-
-run "credential_updated_in_azure" {
+run "read_updated_standard_v2" {
   module {
     source = "./tests/integration/read"
   }
 
   variables {
-    credential_ids = run.update_credential_under_readonly_lock.federated_identity_credential_resource_ids
+    nat_gateway_id = run.update_standard_v2_under_lock.resource_id
   }
 
   assert {
-    condition     = output.subjects["two"] == "repo:example-org/example-repo:environment:two-updated"
-    error_message = "Azure should report the updated subject."
+    condition     = output.nat64 == "Disabled" && output.idle_timeout_in_minutes == 10
+    error_message = "Azure should hold NAT64 off and the new idle timeout."
+  }
+  assert {
+    condition = jsonencode(output.public_ip_ids) == jsonencode({
+      publicIpAddresses   = sort([lower(run.update_standard_v2_under_lock.public_ip_resource_ids["v4"]), lower(run.setup.public_ip_standard_v2_id)])
+      publicIpAddressesV6 = []
+      publicIpPrefixes    = []
+      publicIpPrefixesV6  = []
+    })
+    error_message = "Azure should hold the created and the existing IPv4 address and nothing else."
   }
 }
 
-run "replace_locked_identity" {
-  # A new name replaces the identity. The lock goes first and the pause is replaced with the identity,
-  # so the old identity is deleted only after the lock deletion has propagated.
+run "replace_with_zonal_standard_under_lock" {
+  # A SKU change replaces the gateway, under a new name, and the created address, which takes the gateway's
+  # SKU and zone, also under a new name: the new ones are created first, the old ones deleted after (the
+  # lock is moved). Flow logs are StandardV2's, so the diagnostic setting goes.
   variables {
-    name      = "id-mlz-it-${run.setup.suffix}-renamed"
+    name      = "ng-mlz-it-z1-${run.setup.suffix}"
     parent_id = run.setup.resource_group_id
     location  = run.setup.location
-    federated_identity_credentials = {
-      one = { issuer = "https://token.actions.githubusercontent.com", subject = "repo:example-org/example-repo:environment:one" }
+    sku_name  = "Standard"
+    zones     = ["1"]
+    public_ips = {
+      v4 = { name = "pip-mlz-ng-z1-${run.setup.suffix}" }
+    }
+    public_ip_prefixes = {
+      v4 = { name = "ippre-mlz-ng-z1-${run.setup.suffix}", prefix_length = 31 }
     }
     lock = { kind = "CanNotDelete" }
   }
 
   assert {
-    condition     = output.name == "id-mlz-it-${run.setup.suffix}-renamed" && startswith(module.interfaces.lock_resource_id, "${output.resource_id}/providers/Microsoft.Authorization/locks/")
-    error_message = "The identity should be replaced and locked again."
+    condition     = output.resource_id != run.update_standard_v2_under_lock.resource_id && module.interfaces.lock_resource_id != null && length(output.public_ip_prefixes) == 1
+    error_message = "The new gateway should be locked and have its prefix."
+  }
+}
+
+run "read_zonal_standard" {
+  module {
+    source = "./tests/integration/read"
+  }
+
+  variables {
+    nat_gateway_id = run.replace_with_zonal_standard_under_lock.resource_id
+  }
+
+  assert {
+    condition     = output.sku_name == "Standard" && jsonencode(output.zones) == jsonencode(["1"]) && output.nat64 == null
+    error_message = "Azure should hold a Standard gateway in zone 1, without NAT64."
+  }
+  assert {
+    condition     = length(output.public_ip_ids.publicIpAddresses) == 1 && length(output.public_ip_ids.publicIpPrefixes) == 1
+    error_message = "Azure should hold the zonal address and prefix."
+  }
+}
+
+run "replace_with_no_zone_standard" {
+  # Removing the zone replaces the gateway, under a new name; an existing Standard address created without
+  # zones is attached, and the created address and prefix are destroyed after the old gateway.
+  variables {
+    name                   = "ng-mlz-it-nz-${run.setup.suffix}"
+    parent_id              = run.setup.resource_group_id
+    location               = run.setup.location
+    sku_name               = "Standard"
+    public_ip_resource_ids = { ipv4 = [run.setup.public_ip_standard_id] }
+  }
+
+  assert {
+    condition     = length(output.public_ip_resource_ids) == 0 && length(output.public_ip_prefix_resource_ids) == 0
+    error_message = "The created address and prefix should be destroyed."
+  }
+}
+
+run "read_no_zone_standard" {
+  module {
+    source = "./tests/integration/read"
+  }
+
+  variables {
+    nat_gateway_id = run.replace_with_no_zone_standard.resource_id
+  }
+
+  assert {
+    condition     = output.sku_name == "Standard" && try(length(output.zones), 0) == 0 && jsonencode(output.public_ip_ids.publicIpAddresses) == jsonencode([lower(run.setup.public_ip_standard_id)])
+    error_message = "Azure should hold a Standard gateway in no zone with the existing address."
   }
 }

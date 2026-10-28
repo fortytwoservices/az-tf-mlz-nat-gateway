@@ -1,41 +1,40 @@
-# az-tf-mlz-template
+# az-tf-mlz-nat-gateway
 
-The template for Fortytwo's managed landing zone (MLZ) Terraform modules, `az-tf-mlz-<name>`: AzAPI
-only, shaped like the Azure Verified Modules (AVM) AzAPI modules, without telemetry.
+A Fortytwo managed landing zone (MLZ) module for Azure NAT Gateway, in AzAPI: the NAT gateway
+(`Microsoft.Network/natGateways`) and the public IP addresses and prefixes it sends traffic out from.
 
-## Start a module from this template
+- **StandardV2 by default**: zone-redundant, IPv4 and IPv6, NAT64 (`nat64_enabled`) and flow logs
+  (`NatGatewayFlowlogsV1`, through `diagnostic_settings`). **Standard** is zonal (`zones`, one zone) or in
+  no zone, IPv4 only. Azure changes neither the SKU nor the zone of an existing gateway, so changing either
+  replaces it, under a new `name` (and new names for the addresses and prefixes it creates). StandardV2 is
+  not offered in Canada East, India South Central, Sweden South and West India.
+- **Public IP addresses and prefixes** are created through
+  [`az-tf-mlz-public-ip`](https://github.com/fortytwoservices/az-tf-mlz-public-ip) (`public_ips`,
+  `public_ip_prefixes`, keyed by stable names) with the gateway's SKU and zone, which Azure requires, or
+  given by ID per IP version (`public_ip_resource_ids`, `public_ip_prefix_resource_ids`). Up to 16 IPv4
+  addresses, counting those in prefixes, and on StandardV2 also 16 IPv6. Removing one detaches it before
+  it is destroyed (Azure deletes no address in use), because the gateway is `create_before_destroy`.
+- **Subnets attach themselves**: a subnet sets `natGateway.id` to `resource_id`, as in the example. Azure
+  deletes a gateway only once no subnet uses it, so a replacement creates the new gateway first: subnets in
+  the same configuration move to it, then the old one is deleted. Subnets elsewhere must move before the
+  old gateway can go.
+- **Removing a setting reaches Azure.** Every address and prefix list is sent, empty when unset, because
+  azapi compares only the keys in the body.
+- Lock, role assignments and diagnostic settings, as in Azure Verified Modules, through
+  [`az-tf-mlz-interfaces`](https://github.com/fortytwoservices/az-tf-mlz-interfaces).
 
-1. Create the repository from the template and apply the repository settings:
+```hcl
+module "nat_gateway" {
+  source = "git::https://github.com/fortytwoservices/az-tf-mlz-nat-gateway.git?ref=vX.Y.Z"
 
-   ```sh
-   gh repo create fortytwoservices/az-tf-mlz-<name> --internal --template fortytwoservices/az-tf-mlz-template --clone
-   cd az-tf-mlz-<name>
-   scripts/repo-settings.sh fortytwoservices/az-tf-mlz-<name>
-   ```
+  name      = "ng-hub-swc"
+  parent_id = "/subscriptions/<subscription>/resourceGroups/<resource group>"
+  location  = "swedencentral"
+  public_ip_prefixes = {
+    egress = { name = "ippre-ng-hub-swc", prefix_length = 30 }
+  }
+}
+```
 
-   CI reads the internal `az-tf-mlz-*` modules with the reader App `gh-az-tf-modules-reader`: set its
-   private key as the secret `AZ_TF_MODULE_READER_PRIVATE_KEY` (the script prints the command when it is
-   missing). If other modules will call this one, an org owner also adds the repository to the App's
-   selected repositories (organization settings, GitHub Apps, `gh-az-tf-modules-reader`, Configure).
-
-2. On a branch, replace the placeholder module (below) with the real one: root files, `modules/*`,
-   `examples/*` and the tests. Rewrite this `_header.md`; keep `_footer.md`. Delete `CHANGELOG.md` and
-   set `.release-please-manifest.json` to `{}`: both carry the template's own releases, and left in place
-   they make the module's first release something other than 0.1.0.
-3. Run `scripts/check.sh --fix`, then the Azure tests, and open a pull request whose title starts with
-   `feat:`. Merging it makes release-please open the release pull request for the first version.
-
-## The placeholder module
-
-A user-assigned identity with federated identity credentials. It is here to keep every pattern a
-module needs working and tested:
-
-- the primary resource `azapi_resource.this`, with `resource_types`, `ignore_body_changes`, `retry`,
-  `timeouts` and `tags`;
-- a child resource type as a submodule managing one instance (`modules/federated_identity_credential`),
-  called with `for_each` by the root, with its writes serialised on the parent (`locks`);
-- the lock and role assignment interfaces through
-  [`az-tf-mlz-interfaces`](https://github.com/fortytwoservices/az-tf-mlz-interfaces), with the
-  credentials passed as `lock_dependencies` so the lock is removed around their changes;
-- unit tests with mocked providers, integration tests in Azure, and an example that is applied,
-  planned again (no changes allowed) and destroyed.
+The example deploys a StandardV2 gateway with a public IP address and a prefix, and a subnet that uses it
+(`default`).

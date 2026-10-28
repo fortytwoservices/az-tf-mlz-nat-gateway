@@ -1,9 +1,14 @@
-output "principal_id" {
-  description = "Object ID of the identity's service principal."
-  value       = module.user_assigned_identity.principal_id
+output "public_ip_addresses" {
+  description = "The NAT gateway's public IP addresses, the subnet's outbound addresses."
+  value       = module.nat_gateway.public_ip_addresses
+}
+
+output "public_ip_prefixes" {
+  description = "The NAT gateway's public IP prefixes."
+  value       = module.nat_gateway.public_ip_prefixes
 }
 
 output "resource_id" {
-  description = "Resource ID of the user-assigned identity."
-  value       = module.user_assigned_identity.resource_id
+  description = "Resource ID of the NAT gateway."
+  value       = module.nat_gateway.resource_id
 }
