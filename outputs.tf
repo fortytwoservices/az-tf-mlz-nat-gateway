@@ -1,29 +1,29 @@
-output "client_id" {
-  description = "Client (application) ID of the user-assigned identity."
-  value       = azapi_resource.this.output.properties.clientId
-}
-
-output "federated_identity_credential_resource_ids" {
-  description = "Resource IDs of the federated identity credentials, by credential name."
-  value       = { for name, credential in module.federated_identity_credential : name => credential.resource_id }
-}
-
 output "name" {
-  description = "Name of the user-assigned identity."
+  description = "Name of the NAT gateway."
   value       = azapi_resource.this.name
 }
 
-output "principal_id" {
-  description = "Object (principal) ID of the user-assigned identity's service principal."
-  value       = azapi_resource.this.output.properties.principalId
+output "public_ip_addresses" {
+  description = "The public IP addresses the module created, by key of `public_ips`."
+  value       = { for key, public_ip in module.public_ip : key => public_ip.ip_address }
+}
+
+output "public_ip_prefixes" {
+  description = "The public IP prefixes the module created, in CIDR notation, by key of `public_ip_prefixes`."
+  value       = { for key, prefix in module.public_ip_prefix : key => prefix.ip_prefix }
+}
+
+output "public_ip_prefix_resource_ids" {
+  description = "Resource IDs of the public IP prefixes the module created, by key of `public_ip_prefixes`."
+  value       = { for key, prefix in module.public_ip_prefix : key => prefix.resource_id }
+}
+
+output "public_ip_resource_ids" {
+  description = "Resource IDs of the public IP addresses the module created, by key of `public_ips`."
+  value       = { for key, public_ip in module.public_ip : key => public_ip.resource_id }
 }
 
 output "resource_id" {
-  description = "Resource ID of the user-assigned identity."
+  description = "Resource ID of the NAT gateway, for the `natGateway` of the subnets that use it."
   value       = azapi_resource.this.id
-}
-
-output "tenant_id" {
-  description = "Tenant ID of the user-assigned identity."
-  value       = azapi_resource.this.output.properties.tenantId
 }

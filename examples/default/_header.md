@@ -1,6 +1,6 @@
 # Default example
 
-A resource group, then a user-assigned identity with two federated identity credentials for GitHub
-Actions. The two credentials are written one after the other, as Azure requires.
+A StandardV2 NAT gateway with a public IP address and a /31 public IP prefix it creates, and a virtual
+network whose workload subnet sends its outbound traffic through it (three outbound addresses in all).
 
 Run it with `scripts/e2e.sh examples/default`: apply, a second plan that must be empty, destroy.

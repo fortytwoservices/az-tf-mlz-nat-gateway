@@ -1,23 +1,23 @@
 variable "location" {
   type        = string
-  description = "Azure region of the user-assigned identity, for example `norwayeast`."
+  description = "Azure region of the NAT gateway and the public IP addresses and prefixes it creates, for example `swedencentral`."
   nullable    = false
 }
 
 variable "name" {
   type        = string
-  description = "Name of the user-assigned identity."
+  description = "Name of the NAT gateway. A replacement (a change of `name`, `sku_name`, `zones` or `location`) creates the new gateway before the old one is deleted, so that subnets in the same configuration move to it first. Until then the old gateway holds its public IP addresses and prefixes, so the new one needs others: new names in `public_ips` and `public_ip_prefixes`, other IDs in `public_ip_resource_ids` and `public_ip_prefix_resource_ids`. Outbound addresses therefore change with a replacement, and a replacement for another reason than a rename also needs a new name."
   nullable    = false
 
   validation {
-    condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9_-]{2,127}$", var.name))
-    error_message = "`name` must be 3 to 128 characters: letters, digits, hyphens and underscores, starting with a letter or digit."
+    condition     = can(regex("^[a-zA-Z0-9]([a-zA-Z0-9._-]{0,78}[a-zA-Z0-9_])?$", var.name))
+    error_message = "`name` must be 1 to 80 characters: letters, digits, periods, hyphens and underscores, starting with a letter or digit and ending with a letter, digit or underscore."
   }
 }
 
 variable "parent_id" {
   type        = string
-  description = "Resource ID of the resource group the user-assigned identity is created in."
+  description = "Resource ID of the resource group the NAT gateway is created in."
   nullable    = false
 
   validation {
@@ -26,103 +26,185 @@ variable "parent_id" {
   }
 }
 
-variable "federated_identity_credentials" {
-  type = map(object({
-    issuer    = string
-    subject   = string
-    audiences = optional(list(string), ["api://AzureADTokenExchange"])
-  }))
-  default     = {}
-  description = <<DESCRIPTION
-Federated identity credentials on the user-assigned identity, keyed by credential name (3 to 120 characters:
-letters, digits, hyphens and underscores, starting with a letter or digit). Azure allows 20 per identity.
-
-- `issuer` - URL of the external identity provider, for example `https://token.actions.githubusercontent.com`.
-- `subject` - Identifier of the external workload, for example `repo:<owner>/<repo>:environment:<name>`.
-- `audiences` - (Optional) Audiences accepted in the external token. Defaults to `["api://AzureADTokenExchange"]`.
-DESCRIPTION
+variable "idle_timeout_in_minutes" {
+  type        = number
+  default     = 4
+  description = "(Optional) TCP idle timeout in minutes, 4 to 120. Defaults to `4`, Azure's default; a longer timeout holds SNAT ports longer."
   nullable    = false
 
   validation {
-    condition     = length(var.federated_identity_credentials) <= 20
-    error_message = "A user-assigned identity holds at most 20 federated identity credentials."
+    condition     = var.idle_timeout_in_minutes >= 4 && var.idle_timeout_in_minutes <= 120 && floor(var.idle_timeout_in_minutes) == var.idle_timeout_in_minutes
+    error_message = "`idle_timeout_in_minutes` must be a whole number from 4 to 120."
   }
 }
 
-variable "isolation_scope" {
-  type        = string
-  default     = "None"
-  description = "Regional restriction on assigning the identity: `None` (Azure's default) or `Regional`."
+variable "nat64_enabled" {
+  type        = bool
+  default     = false
+  description = "(Optional) Translate outbound IPv6 traffic to `64:ff9b::/96` into IPv4 (NAT64). StandardV2 only, and needs an IPv4 public IP address or prefix; the DNS64 that synthesises the AAAA records is the caller's. Defaults to `false`."
   nullable    = false
 
   validation {
-    condition     = contains(["None", "Regional"], var.isolation_scope)
-    error_message = "`isolation_scope` must be `None` or `Regional`."
+    condition     = !var.nat64_enabled || var.sku_name == "StandardV2"
+    error_message = "NAT64 needs `sku_name = \"StandardV2\"`."
+  }
+  validation {
+    condition = !var.nat64_enabled || anytrue([
+      anytrue([for public_ip in values(var.public_ips) : public_ip.ip_version == "IPv4"]),
+      anytrue([for prefix in values(var.public_ip_prefixes) : prefix.ip_version == "IPv4"]),
+      length(var.public_ip_resource_ids.ipv4) > 0,
+      length(var.public_ip_prefix_resource_ids.ipv4) > 0,
+    ])
+    error_message = "NAT64 needs an IPv4 public IP address or prefix (Microsoft Learn)."
   }
 }
 
-variable "lock" {
+variable "public_ip_prefix_resource_ids" {
   type = object({
-    kind  = string
-    name  = optional(string, null)
-    notes = optional(string, null)
+    ipv4 = optional(list(string), [])
+    ipv6 = optional(list(string), [])
   })
-  default     = null
-  description = <<DESCRIPTION
-Controls the Resource Lock configuration for this resource. The following properties can be specified:
-
-- `kind` - (Required) The type of lock. Possible values are `\"CanNotDelete\"` and `\"ReadOnly\"`.
-- `name` - (Optional) The name of the lock. If not specified, a name will be generated based on the `kind` value. Changing this forces the creation of a new resource.
-- `notes` - (Optional) Notes about the lock. This value maps to `Microsoft.Authorization/locks.properties.notes`.
-DESCRIPTION
-
-  validation {
-    condition     = var.lock != null ? contains(["CanNotDelete", "ReadOnly"], var.lock.kind) : true
-    error_message = "Lock kind must be either `\"CanNotDelete\"` or `\"ReadOnly\"`."
-  }
-}
-
-variable "role_assignments" {
-  type = map(object({
-    name                                   = optional(string, null)
-    role_definition_id_or_name             = string
-    principal_id                           = string
-    description                            = optional(string, null)
-    skip_service_principal_aad_check       = optional(bool, false)
-    condition                              = optional(string, null)
-    condition_version                      = optional(string, null)
-    delegated_managed_identity_resource_id = optional(string, null)
-    principal_type                         = optional(string, null)
-  }))
   default     = {}
-  nullable    = false
   description = <<DESCRIPTION
-A map of role assignments to create on the user-assigned identity. The map key is deliberately arbitrary to avoid issues where map keys maybe unknown at plan time.
+(Optional) Existing public IP prefixes to attach, by IP version. They must have the NAT gateway's SKU and, for a zonal Standard gateway, its zone or all three (an address or prefix without zones is rejected).
 
-- `name` - (Optional) The name of the role assignment. If not set, a random UUID will be generated. Changing this forces the creation of a new resource.
-- `role_definition_id_or_name` - The ID or name of the role definition to assign to the principal.
-- `principal_id` - The ID of the principal to assign the role to.
-- `description` - (Optional) The description of the role assignment.
-- `skip_service_principal_aad_check` - (Optional) If set to true, skips the Azure Active Directory check for the service principal in the tenant. Defaults to false.
-- `condition` - (Optional) The condition which will be used to scope the role assignment.
-- `condition_version` - (Optional) The version of the condition syntax. Leave as `null` if you are not using a condition, if you are then valid values are '2.0'.
-- `delegated_managed_identity_resource_id` - (Optional) The delegated Azure Resource Id which contains a Managed Identity. Changing this forces a new resource to be created. This field is only used in cross-tenant scenario.
-- `principal_type` - (Optional) The type of the `principal_id`. Possible values are `User`, `Group` and `ServicePrincipal`. It is necessary to explicitly set this attribute when creating role assignments if the principal creating the assignment is constrained by ABAC rules that filters on the PrincipalType attribute.
-
-> Note: only set `skip_service_principal_aad_check` to true if you are assigning a role to a service principal.
+- `ipv4` - (Optional) IPv4 prefix IDs.
+- `ipv6` - (Optional) IPv6 prefix IDs. StandardV2 only.
 DESCRIPTION
+  nullable    = false
 
   validation {
     condition = alltrue([
-      for _, v in var.role_assignments :
-      v.delegated_managed_identity_resource_id == null || can(provider::azapi::parse_resource_id("Microsoft.ManagedIdentity/userAssignedIdentities", v.delegated_managed_identity_resource_id))
+      for id in concat(var.public_ip_prefix_resource_ids.ipv4, var.public_ip_prefix_resource_ids.ipv6) :
+      can(provider::azapi::parse_resource_id("Microsoft.Network/publicIPPrefixes", id))
     ])
-    error_message = "Each `role_assignments[*].delegated_managed_identity_resource_id` must be a valid user-assigned managed identity resource ID, or null."
+    error_message = "Each `public_ip_prefix_resource_ids` entry must be a public IP prefix resource ID."
+  }
+  validation {
+    condition     = length(var.public_ip_prefix_resource_ids.ipv6) == 0 || var.sku_name == "StandardV2"
+    error_message = "IPv6 prefixes need `sku_name = \"StandardV2\"`."
   }
 }
 
-variable "tags" {
-  type        = map(string)
+variable "public_ip_prefixes" {
+  type = map(object({
+    name          = string
+    prefix_length = number
+    ip_version    = optional(string, "IPv4")
+  }))
+  default     = {}
+  description = <<DESCRIPTION
+(Optional) Public IP prefixes the module creates through `az-tf-mlz-public-ip` (`modules/public_ip_prefix`) and attaches, keyed by any stable name. Each gets the NAT gateway's SKU and zones.
+
+- `name` - Name of the prefix.
+- `prefix_length` - `28` to `31` for IPv4 (16 to 2 addresses), `124` to `127` for IPv6.
+- `ip_version` - (Optional) `IPv4` (default) or `IPv6`, which needs StandardV2.
+DESCRIPTION
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for prefix in values(var.public_ip_prefixes) : contains(["IPv4", "IPv6"], prefix.ip_version)])
+    error_message = "Each `public_ip_prefixes[*].ip_version` must be `IPv4` or `IPv6`."
+  }
+  validation {
+    condition = alltrue([
+      for prefix in values(var.public_ip_prefixes) :
+      prefix.ip_version == "IPv4" ? prefix.prefix_length >= 28 && prefix.prefix_length <= 31 : prefix.prefix_length >= 124 && prefix.prefix_length <= 127
+    ])
+    error_message = "A NAT gateway takes IPv4 prefixes of /28 to /31 and IPv6 prefixes of /124 to /127."
+  }
+  validation {
+    condition     = alltrue([for prefix in values(var.public_ip_prefixes) : prefix.ip_version == "IPv4"]) || var.sku_name == "StandardV2"
+    error_message = "IPv6 prefixes need `sku_name = \"StandardV2\"`."
+  }
+}
+
+variable "public_ip_resource_ids" {
+  type = object({
+    ipv4 = optional(list(string), [])
+    ipv6 = optional(list(string), [])
+  })
+  default     = {}
+  description = <<DESCRIPTION
+(Optional) Existing public IP addresses to attach, by IP version. They must have the NAT gateway's SKU and, for a zonal Standard gateway, its zone or all three (an address or prefix without zones is rejected).
+
+- `ipv4` - (Optional) IPv4 address IDs.
+- `ipv6` - (Optional) IPv6 address IDs. StandardV2 only.
+DESCRIPTION
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for id in concat(var.public_ip_resource_ids.ipv4, var.public_ip_resource_ids.ipv6) :
+      can(provider::azapi::parse_resource_id("Microsoft.Network/publicIPAddresses", id))
+    ])
+    error_message = "Each `public_ip_resource_ids` entry must be a public IP address resource ID."
+  }
+  validation {
+    condition     = length(var.public_ip_resource_ids.ipv6) == 0 || var.sku_name == "StandardV2"
+    error_message = "IPv6 addresses need `sku_name = \"StandardV2\"`."
+  }
+}
+
+variable "public_ips" {
+  type = map(object({
+    name       = string
+    ip_version = optional(string, "IPv4")
+  }))
+  default     = {}
+  description = <<DESCRIPTION
+(Optional) Public IP addresses the module creates through `az-tf-mlz-public-ip` and attaches, keyed by any stable name. Each gets the NAT gateway's SKU and zones: a zonal Standard gateway rejects an address outside its zone.
+
+- `name` - Name of the public IP address.
+- `ip_version` - (Optional) `IPv4` (default) or `IPv6`, which needs StandardV2.
+
+A NAT gateway uses at most 16 IPv4 addresses, counting those in prefixes, and on StandardV2 also 16 IPv6 addresses.
+DESCRIPTION
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for public_ip in values(var.public_ips) : contains(["IPv4", "IPv6"], public_ip.ip_version)])
+    error_message = "Each `public_ips[*].ip_version` must be `IPv4` or `IPv6`."
+  }
+  validation {
+    condition     = alltrue([for public_ip in values(var.public_ips) : public_ip.ip_version == "IPv4"]) || var.sku_name == "StandardV2"
+    error_message = "IPv6 addresses need `sku_name = \"StandardV2\"`."
+  }
+  # Prefixes given by ID are not counted: their size is not known here, and Azure rejects the excess.
+  validation {
+    condition = alltrue([
+      for version in ["IPv4", "IPv6"] :
+      length([for public_ip in values(var.public_ips) : public_ip if public_ip.ip_version == version]) +
+      length(version == "IPv4" ? var.public_ip_resource_ids.ipv4 : var.public_ip_resource_ids.ipv6) +
+      sum(concat([0], [for prefix in values(var.public_ip_prefixes) : pow(2, (version == "IPv4" ? 32 : 128) - prefix.prefix_length) if prefix.ip_version == version])) <= 16
+    ])
+    error_message = "A NAT gateway uses at most 16 IPv4 and 16 IPv6 addresses, counting the addresses in prefixes."
+  }
+}
+
+variable "sku_name" {
+  type        = string
+  default     = "StandardV2"
+  description = "(Optional) `StandardV2` (default: zone-redundant, IPv6, NAT64, flow logs) or `Standard` (zonal or no zone, IPv4 only). Its public IP addresses and prefixes must have the same SKU. Azure cannot change the SKU, so changing it replaces the NAT gateway (see `name`). StandardV2 is not offered in Canada East, India South Central, Sweden South and West India."
+  nullable    = false
+
+  validation {
+    condition     = contains(["Standard", "StandardV2"], var.sku_name)
+    error_message = "`sku_name` must be `Standard` or `StandardV2`."
+  }
+}
+
+variable "zones" {
+  type        = list(string)
   default     = null
-  description = "(Optional) Tags of the resource."
+  description = "(Optional) The one availability zone of a zonal Standard NAT gateway, for example `[\"1\"]`. Null (the default) leaves a Standard gateway in no zone, where Azure places it; a StandardV2 gateway is always zone-redundant and takes no zones. Azure cannot move a gateway between zones, so changing this replaces it (see `name`)."
+
+  validation {
+    condition     = var.zones == null ? true : length(var.zones) == 1 && alltrue([for zone in var.zones : contains(["1", "2", "3"], zone)])
+    error_message = "`zones` must be null or one zone: `[\"1\"]`, `[\"2\"]` or `[\"3\"]`."
+  }
+  validation {
+    condition     = var.zones == null || var.sku_name == "Standard"
+    error_message = "Only a Standard NAT gateway takes `zones`; StandardV2 is zone-redundant."
+  }
 }

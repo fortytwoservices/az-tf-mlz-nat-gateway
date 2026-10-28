@@ -2,7 +2,7 @@
 provider "azapi" {}
 
 locals {
-  location = "norwayeast"
+  location = "swedencentral"
   tags     = { example = "default" }
 }
 
@@ -16,7 +16,7 @@ resource "random_string" "suffix" {
 
 resource "azapi_resource" "resource_group" {
   type      = "Microsoft.Resources/resourceGroups@2024-11-01"
-  name      = "rg-mlz-template-${random_string.suffix.result}"
+  name      = "rg-mlz-ng-${random_string.suffix.result}"
   parent_id = "/subscriptions/${data.azapi_client_config.current.subscription_id}"
   location  = local.location
 
@@ -24,21 +24,48 @@ resource "azapi_resource" "resource_group" {
   tags                   = local.tags
 }
 
-module "user_assigned_identity" {
+module "nat_gateway" {
   source = "../../"
 
-  name      = "id-mlz-template-${random_string.suffix.result}"
+  name      = "ng-mlz-${random_string.suffix.result}"
   parent_id = azapi_resource.resource_group.id
   location  = local.location
-  federated_identity_credentials = {
-    github-main = {
-      issuer  = "https://token.actions.githubusercontent.com"
-      subject = "repo:example-org/example-repo:ref:refs/heads/main"
-    }
-    github-pull-request = {
-      issuer  = "https://token.actions.githubusercontent.com"
-      subject = "repo:example-org/example-repo:pull_request"
-    }
+  public_ips = {
+    egress = { name = "pip-ng-mlz-${random_string.suffix.result}" }
+  }
+  public_ip_prefixes = {
+    egress = { name = "ippre-ng-mlz-${random_string.suffix.result}", prefix_length = 31 }
   }
   tags = local.tags
+}
+
+resource "azapi_resource" "virtual_network" {
+  type      = "Microsoft.Network/virtualNetworks@2024-05-01"
+  name      = "vnet-mlz-ng-${random_string.suffix.result}"
+  parent_id = azapi_resource.resource_group.id
+  location  = local.location
+  body = {
+    properties = {
+      addressSpace = { addressPrefixes = ["10.0.0.0/24"] }
+    }
+  }
+
+  response_export_values = []
+  tags                   = local.tags
+}
+
+# The subnet attaches itself to the NAT gateway; the gateway has no list of subnets to write.
+resource "azapi_resource" "workload_subnet" {
+  type      = "Microsoft.Network/virtualNetworks/subnets@2024-05-01"
+  name      = "snet-workload"
+  parent_id = azapi_resource.virtual_network.id
+  body = {
+    properties = {
+      addressPrefixes       = ["10.0.0.0/26"]
+      defaultOutboundAccess = false
+      natGateway            = { id = module.nat_gateway.resource_id }
+    }
+  }
+
+  response_export_values = []
 }
